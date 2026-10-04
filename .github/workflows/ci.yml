@@ -27,7 +27,7 @@ jobs:
         run: uv run ruff format --check backend tests
       - name: Run API contract tests
         run: uv run pytest tests/unit --strict-markers
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.19.0
       - uses: actions/setup-node@v4
@@ -68,7 +68,7 @@ jobs:
         run: uv run ruff format --check backend tests
       - name: Check Compose security contract
         run: python scripts/check_compose_security.py
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.19.0
       - uses: actions/setup-node@v4
