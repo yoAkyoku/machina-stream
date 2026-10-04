@@ -1,0 +1,25 @@
+# Optional local override for networks that replace public TLS certificates
+# (for example, a corporate proxy or endpoint-security web filter). The CA
+# file is never copied into an image layer; BuildKit exposes it only to the
+# package-install/build step.
+services:
+  api:
+    build:
+      secrets:
+        - registry_ca
+  processor:
+    build:
+      secrets:
+        - registry_ca
+  simulator:
+    build:
+      secrets:
+        - registry_ca
+  web:
+    build:
+      secrets:
+        - registry_ca
+
+secrets:
+  registry_ca:
+    file: ${MACHINA_REGISTRY_CA_FILE}

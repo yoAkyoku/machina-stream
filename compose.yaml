@@ -1,0 +1,220 @@
+services:
+  postgres:
+    image: postgres:18.6
+    environment:
+      POSTGRES_DB: machina
+      POSTGRES_USER: machina
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-machina-local-only}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./db/init/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U machina -d machina"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:3.9.2
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    restart: unless-stopped
+
+  kafka-init:
+    image: apache/kafka:3.9.2
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - >-
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
+        --topic telemetry.events.v1 --partitions 6 --replication-factor 1 --config retention.ms=604800000;
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
+        --topic telemetry.events.v1.dlq --partitions 6 --replication-factor 1 --config retention.ms=2592000000
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://machina:${POSTGRES_PASSWORD:-machina-local-only}@postgres:5432/machina
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TELEMETRY_TOPIC: telemetry.events.v1
+      MACHINA_DB_HEALTH_INTERVAL_SECONDS: ${MACHINA_DB_HEALTH_INTERVAL_SECONDS:-15}
+      SIMULATOR_EVENT_INTERVAL_SECONDS: ${SIMULATOR_EVENT_INTERVAL_SECONDS:-10}
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-18000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    init: true
+    read_only: true
+    tmpfs: ["/tmp:size=16m,noexec,nosuid"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  processor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "machina_stream.worker"]
+    environment:
+      DATABASE_URL: postgresql://machina:${POSTGRES_PASSWORD:-machina-local-only}@postgres:5432/machina
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TELEMETRY_TOPIC: telemetry.events.v1
+      KAFKA_DLQ_TOPIC: telemetry.events.v1.dlq
+      KAFKA_CONSUMER_GROUP: machina-processor-v1
+      KAFKA_DLQ_AUDIT_GROUP: machina-dlq-audit-v1
+      DATABASE_POOL_SIZE: ${PROCESSOR_DATABASE_POOL_SIZE:-20}
+      MACHINA_DB_HEALTH_INTERVAL_SECONDS: ${MACHINA_DB_HEALTH_INTERVAL_SECONDS:-15}
+      SIMULATOR_EVENT_INTERVAL_SECONDS: ${SIMULATOR_EVENT_INTERVAL_SECONDS:-10}
+      PROCESSOR_METRICS_PORT: 9101
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; body=urllib.request.urlopen('http://127.0.0.1:9101/metrics', timeout=2).read().decode(); raise SystemExit(0 if any(line.startswith('machina_processor_ready ') and line.endswith('1.0') for line in body.splitlines()) else 1)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    init: true
+    read_only: true
+    tmpfs: ["/tmp:size=16m,noexec,nosuid"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "machina_stream.simulator"]
+    environment:
+      MACHINA_API_URL: http://api:8000
+      SIMULATOR_MACHINE_COUNT: ${SIMULATOR_MACHINE_COUNT:-1000}
+      SIMULATOR_EVENT_INTERVAL_SECONDS: ${SIMULATOR_EVENT_INTERVAL_SECONDS:-10}
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs: ["/tmp:size=16m,noexec,nosuid"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:${API_HOST_PORT:-18000}
+    ports:
+      - "127.0.0.1:3001:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 4s
+      retries: 10
+      start_period: 20s
+    init: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+      processor:
+        condition: service_started
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.2.1
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

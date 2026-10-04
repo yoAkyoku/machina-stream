@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Machina Stream
+    orgId: 1
+    folder: Machina Stream
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

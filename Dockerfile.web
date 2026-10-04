@@ -1,0 +1,42 @@
+FROM node:24-alpine AS dependencies
+ENV NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+RUN --mount=type=secret,id=registry_ca,target=/tmp/machina-registry-ca.crt,required=false \
+    if [ -s /tmp/machina-registry-ca.crt ]; then \
+      cat /tmp/machina-registry-ca.crt >> /etc/ssl/certs/ca-certificates.crt \
+      && export NODE_EXTRA_CA_CERTS=/tmp/machina-registry-ca.crt \
+      && export NPM_CONFIG_CAFILE=/tmp/machina-registry-ca.crt \
+      && export npm_config_cafile=/tmp/machina-registry-ca.crt; \
+    fi \
+    && corepack enable \
+    && corepack prepare pnpm@11.19.0 --activate \
+    && pnpm install --frozen-lockfile
+
+FROM node:24-alpine AS build
+ENV NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY --from=dependencies /root/.cache/node/corepack /root/.cache/node/corepack
+COPY web/ ./
+ARG NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18000
+ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+RUN --mount=type=secret,id=registry_ca,target=/tmp/machina-registry-ca.crt,required=false \
+    if [ -s /tmp/machina-registry-ca.crt ]; then \
+      export NODE_EXTRA_CA_CERTS=/tmp/machina-registry-ca.crt \
+      && export NPM_CONFIG_CAFILE=/tmp/machina-registry-ca.crt \
+      && export npm_config_cafile=/tmp/machina-registry-ca.crt; \
+    fi \
+    && corepack enable \
+    && pnpm build
+
+FROM node:24-alpine AS runtime
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 HOSTNAME=0.0.0.0
+WORKDIR /app
+RUN addgroup -S -g 10001 machina && adduser -S -u 10001 -G machina machina
+COPY --from=build --chown=machina:machina /app/public ./public
+COPY --from=build --chown=machina:machina /app/.next/standalone ./
+COPY --from=build --chown=machina:machina /app/.next/static ./.next/static
+USER 10001:10001
+EXPOSE 3000
+CMD ["node", "server.js"]
