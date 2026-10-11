@@ -7,7 +7,7 @@ requires-python = ">=3.12,<3.13"
 license = "MIT"
 dependencies = [
   "aiokafka==0.14.0",
-  "asyncpg==0.31.0",
+  "asyncpg==0.32.0",
   "fastapi==0.142.2",
   "httpx==0.28.1",
   "prometheus-client==0.26.0",
